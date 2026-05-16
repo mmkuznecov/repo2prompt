@@ -11,9 +11,8 @@ from collections import defaultdict
 
 LANGUAGE_EXTENSIONS = {
     "py": [".py"],
-    "js": [".js", ".mjs", ".cjs"],
+    "js": [".js", ".mjs", ".cjs", ".jsx"],
     "ts": [".ts", ".tsx"],
-    "jsx": [".jsx"],
     "cpp": [".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".h", ".hxx"],
     "c": [".c", ".h"],
     "java": [".java"],
@@ -375,18 +374,20 @@ def collect_files(
         )
         for fname in sorted(files):
             fpath = os.path.join(root, fname)
-            if should_ignore(fpath, repo_path, gitignore_patterns):
-                continue
             if fpath in seen:
                 continue
 
-            include = False
-            for pat in patterns:
-                if fnmatch.fnmatch(fname, pat):
-                    include = True
-                    break
-            if not include and include_important:
-                include = _is_important_file(fpath)
+            is_important = include_important and _is_important_file(fpath)
+            # Important files bypass .gitignore; regular source files don't.
+            if not is_important and should_ignore(fpath, repo_path, gitignore_patterns):
+                continue
+
+            include = is_important
+            if not include:
+                for pat in patterns:
+                    if fnmatch.fnmatch(fname, pat):
+                        include = True
+                        break
 
             if include:
                 collected.append(fpath)
@@ -487,4 +488,11 @@ def traverse_and_copy(
             relative_path = os.path.relpath(fpath, start=repo_path)
             write_file_contents(f_out, relative_path, fpath)
 
+    if not files:
+        hint = (
+            " (tip: re-run with --detect-langs to see what's in the repo)"
+            if not patterns
+            else ""
+        )
+        print(f"Warning: 0 files collected — check your patterns and .gitignore.{hint}")
     print(f"Wrote {len(files)} file(s) to '{output_file}'.")
