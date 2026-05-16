@@ -5,11 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "repo2prompt"
 version = "0.2.0"
-description = "Copy repository contents to a text file for LLM prompts."
+description = "Copy repository contents to a text file for LLM prompts, with .gitignore support, language detection, and auto-inclusion of important project files."
 authors = [{ name = "Mikhail Kuznetsov", email = "mmkuznecov2002@gmail.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
+keywords = ["repository", "llm", "prompt", "gitignore", "cli"]
+dependencies = [
+    "pathspec>=0.10",
+]
 
 [project.urls]
 Homepage = "https://github.com/mmkuznecov/repo2prompt"
