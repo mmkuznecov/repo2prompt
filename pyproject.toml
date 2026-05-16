@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repo2prompt"
+version = "0.2.0"
+description = "Copy repository contents to a text file for LLM prompts."
+authors = [{ name = "Mikhail Kuznetsov", email = "mmkuznecov2002@gmail.com" }]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+
+[project.urls]
+Homepage = "https://github.com/mmkuznecov/repo2prompt"
+
+[project.scripts]
+repo2prompt = "repo2prompt.cli:main"
