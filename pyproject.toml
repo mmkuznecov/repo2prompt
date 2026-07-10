@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repo2prompt"
-version = "0.2.0"
-description = "Copy repository contents to a text file for LLM prompts, with .gitignore support, language detection, and auto-inclusion of important project files."
+version = "0.4.0"
+description = "Create LLM-ready repository prompts with dependency maps, symbol signatures, .gitignore support, and language detection."
 authors = [{ name = "Mikhail Kuznetsov", email = "mmkuznecov2002@gmail.com" }]
 readme = "README.md"
 license = { text = "MIT" }
@@ -15,8 +15,21 @@ dependencies = [
     "pathspec>=0.10",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "ruff>=0.6",
+]
+
 [project.urls]
 Homepage = "https://github.com/mmkuznecov/repo2prompt"
 
 [project.scripts]
 repo2prompt = "repo2prompt.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

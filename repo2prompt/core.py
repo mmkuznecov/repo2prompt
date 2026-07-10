@@ -25,55 +25,7 @@ from typing import Iterable
 
 import pathspec
 
-# Silence pathspec's "GitWildMatchPattern is deprecated" warning, which is
-# emitted from inside pathspec itself and not actionable for end users.
-warnings.filterwarnings(
-    "ignore",
-    message=r"GitWildMatchPattern \('gitwildmatch'\) is deprecated.*",
-)
-
-
-# ---------------------------------------------------------------------------
-# Language definitions
-# ---------------------------------------------------------------------------
-
-# Each canonical language key maps to its file-extension list.  These power
-# both detection (extension → language) and the CLI shorthand flags
-# (``--py``, ``--js``, ``--cpp`` …).
-LANGUAGE_EXTENSIONS: dict[str, list[str]] = {
-    "py": [".py", ".pyi"],
-    "js": [".js", ".mjs", ".cjs", ".jsx"],
-    "ts": [".ts", ".tsx"],
-    "cpp": [".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx"],
-    "c": [".c", ".h"],
-    "java": [".java"],
-    "go": [".go"],
-    "rs": [".rs"],
-    "rb": [".rb"],
-    "php": [".php"],
-    "cs": [".cs"],
-    "swift": [".swift"],
-    "kt": [".kt", ".kts"],
-    "scala": [".scala"],
-    "r": [".r", ".R"],
-    "sh": [".sh", ".bash", ".zsh"],
-    "lua": [".lua"],
-    "ex": [".ex", ".exs"],
-    "hs": [".hs"],
-    "ml": [".ml", ".mli"],
-    "dart": [".dart"],
-    "vue": [".vue"],
-    "svelte": [".svelte"],
-    "sql": [".sql"],
-}
-
-# Reverse map: extension → canonical language key.
-# When a language with overlapping extensions appears later in the dict
-# (e.g. ``c`` claims ``.h``), it wins over earlier ones — fine for stats.
-EXT_TO_LANG: dict[str, str] = {}
-for _lang, _exts in LANGUAGE_EXTENSIONS.items():
-    for _ext in _exts:
-        EXT_TO_LANG[_ext.lower()] = _lang
+from .languages import EXT_TO_LANG, LANGUAGE_EXTENSIONS  # noqa: F401
 
 
 # Important non-source files that should always be included by default.
@@ -165,6 +117,9 @@ IMPORTANT_FILENAMES: set[str] = {
     "CODE_OF_CONDUCT.md",
     ".editorconfig",
     ".gitattributes",
+    ".gitignore",
+    ".dockerignore",
+    ".npmignore",
     # CI configs
     ".travis.yml",
     "azure-pipelines.yml",
@@ -197,8 +152,17 @@ class GitignoreFilter:
         self._raw_patterns: list[str] = []
         self._gitignore_files: list[str] = []
         self._load()
-        # ``gitwildmatch`` is the dialect git itself uses.
-        self.spec = pathspec.PathSpec.from_lines("gitwildmatch", self._raw_patterns)
+        # Prefer PathSpec's dedicated GitIgnoreSpec when available. Older
+        # pathspec releases fall back to the legacy gitwildmatch factory.
+        gitignore_spec = getattr(pathspec, "GitIgnoreSpec", None)
+        if gitignore_spec is not None:
+            self.spec = gitignore_spec.from_lines(self._raw_patterns)
+        else:  # pragma: no cover - compatibility with older pathspec releases
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self.spec = pathspec.PathSpec.from_lines(
+                    "gitwildmatch", self._raw_patterns
+                )
 
     # ------------------------------------------------------------------
     def _load(self) -> None:
@@ -325,15 +289,21 @@ class GitignoreFilter:
 
 
 def _count_lines(path: str) -> int:
-    """Cheaply count newline characters; binary-safe (no decoding)."""
+    """Count physical lines without decoding the file."""
     try:
         count = 0
+        saw_data = False
+        last_byte = b""
         with open(path, "rb") as f:
             while True:
                 chunk = f.read(65536)
                 if not chunk:
                     break
+                saw_data = True
+                last_byte = chunk[-1:]
                 count += chunk.count(b"\n")
+        if saw_data and last_byte != b"\n":
+            count += 1
         return count
     except OSError:
         return 0
@@ -342,6 +312,7 @@ def _count_lines(path: str) -> int:
 def detect_languages(
     repo_path: str,
     gitignore: GitignoreFilter,
+    exclude_paths: Iterable[str] = (),
 ) -> dict[str, float]:
     """
     Walk the repo and count source-code lines per language.
@@ -350,6 +321,7 @@ def detect_languages(
     counts: dict[str, int] = defaultdict(int)
     total = 0
     repo_path = os.path.abspath(repo_path)
+    excluded = {os.path.abspath(path) for path in exclude_paths}
 
     for root, dirs, files in os.walk(repo_path):
         # Filter dirs in-place so os.walk skips ignored subtrees entirely.
@@ -360,7 +332,7 @@ def detect_languages(
         ]
         for fname in files:
             fpath = os.path.join(root, fname)
-            if gitignore.is_ignored(fpath):
+            if os.path.abspath(fpath) in excluded or gitignore.is_ignored(fpath):
                 continue
             ext = Path(fname).suffix.lower()
             lang = EXT_TO_LANG.get(ext)
@@ -389,6 +361,7 @@ def generate_directory_tree(
     repo_path: str,
     gitignore: GitignoreFilter,
     prefix: str = "",
+    exclude_paths: Iterable[str] = (),
 ) -> str:
     """ASCII directory tree, with `.git` and gitignored entries hidden."""
     tree = ""
@@ -397,11 +370,14 @@ def generate_directory_tree(
     except (PermissionError, OSError):
         return tree
 
+    excluded = {os.path.abspath(path) for path in exclude_paths}
     items_paths = [os.path.join(dir_path, i) for i in items]
     items_paths = [
         p
         for p in items_paths
-        if os.path.basename(p) != ".git" and not gitignore.is_ignored(p)
+        if os.path.basename(p) != ".git"
+        and os.path.abspath(p) not in excluded
+        and not gitignore.is_ignored(p)
     ]
     # Directories first, then files; both alphabetical.
     items_paths.sort(key=lambda x: (not os.path.isdir(x), x.lower()))
@@ -414,7 +390,11 @@ def generate_directory_tree(
         if os.path.isdir(item_path):
             extension = "│   " if i < n else "    "
             tree += generate_directory_tree(
-                item_path, repo_path, gitignore, prefix + extension
+                item_path,
+                repo_path,
+                gitignore,
+                prefix + extension,
+                exclude_paths=excluded,
             )
     return tree
 
@@ -450,6 +430,7 @@ def collect_files(
     patterns: list[str],
     gitignore: GitignoreFilter,
     include_important: bool = True,
+    exclude_paths: Iterable[str] = (),
 ) -> list[str]:
     """
     Walk *repo_path* and return absolute file paths to include.  A file is
@@ -459,6 +440,7 @@ def collect_files(
     collected: list[str] = []
     seen: set[str] = set()
     repo_path = os.path.abspath(repo_path)
+    excluded = {os.path.abspath(path) for path in exclude_paths}
 
     for root, dirs, files in os.walk(repo_path):
         dirs[:] = sorted(
@@ -468,7 +450,7 @@ def collect_files(
         )
         for fname in sorted(files):
             fpath = os.path.join(root, fname)
-            if fpath in seen:
+            if fpath in seen or os.path.abspath(fpath) in excluded:
                 continue
             if gitignore.is_ignored(fpath):
                 continue
@@ -527,6 +509,12 @@ def traverse_and_copy(
     include_important: bool = True,
     show_language_stats: bool = True,
     verbose: bool = False,
+    include_analysis: bool = True,
+    analysis_only: bool = False,
+    dependency_format: str = "text",
+    analysis_json: str | None = None,
+    max_symbols_per_file: int = 50,
+    include_external_dependencies: bool = True,
 ) -> int:
     """
     Analyse the repo, collect matching files, write the prompt.
@@ -539,6 +527,12 @@ def traverse_and_copy(
     include_important   : auto-include Dockerfile / Makefile / etc.
     show_language_stats : print the language breakdown to stdout
     verbose             : extra diagnostic output to stderr
+    include_analysis    : include dependency and symbol analysis
+    analysis_only       : omit full file contents after the analysis section
+    dependency_format   : text, mermaid, or both
+    analysis_json       : optional standalone JSON analysis path
+    max_symbols_per_file: per-file signature display limit (0 means unlimited)
+    include_external_dependencies: show external packages in text maps
 
     Returns
     -------
@@ -547,6 +541,15 @@ def traverse_and_copy(
     import sys
 
     repo_path = os.path.abspath(repo_path)
+
+    if dependency_format not in {"text", "mermaid", "both"}:
+        raise ValueError("dependency_format must be 'text', 'mermaid', or 'both'")
+    if analysis_json and os.path.abspath(analysis_json) == os.path.abspath(output_file):
+        raise ValueError("analysis_json must be different from output_file")
+    if max_symbols_per_file < 0:
+        raise ValueError("max_symbols_per_file must be zero or positive")
+    if analysis_only:
+        include_analysis = True
 
     # 1. Warn if not a Git repository
     git_dir = os.path.join(repo_path, ".git")
@@ -561,8 +564,12 @@ def traverse_and_copy(
     # 2. Build the gitignore filter
     gitignore = GitignoreFilter(repo_path, verbose=verbose)
 
+    excluded_outputs = [output_file]
+    if analysis_json:
+        excluded_outputs.append(analysis_json)
+
     # 3. Detect languages
-    lang_stats = detect_languages(repo_path, gitignore)
+    lang_stats = detect_languages(repo_path, gitignore, exclude_paths=excluded_outputs)
     if show_language_stats and lang_stats:
         print("\nLanguage breakdown (by lines of code):")
         for lang, pct in lang_stats.items():
@@ -570,8 +577,15 @@ def traverse_and_copy(
             print(f"  {lang:<8} {pct:>5.1f}%  {bar}")
         print()
 
-    # 4. Collect files
-    files = collect_files(repo_path, patterns, gitignore, include_important)
+    # 4. Collect files. Exclude generated outputs so repeated runs never ingest
+    # their own previous prompt or analysis JSON.
+    files = collect_files(
+        repo_path,
+        patterns,
+        gitignore,
+        include_important,
+        exclude_paths=excluded_outputs,
+    )
 
     if verbose:
         print(
@@ -588,8 +602,30 @@ def traverse_and_copy(
                 file=sys.stderr,
             )
 
-    # 5. Write the output
-    directory_tree = generate_directory_tree(repo_path, repo_path, gitignore)
+    # 5. Analyze the selected files before writing, so the prompt starts with a
+    # compact architectural map. Static analysis is deliberately best-effort.
+    project_analysis = None
+    if include_analysis or analysis_json:
+        from .analysis import analyze_project
+
+        project_analysis = analyze_project(repo_path, files, EXT_TO_LANG)
+
+    # 6. Snapshot the tree before creating generated output directories/files.
+    directory_tree = generate_directory_tree(
+        repo_path,
+        repo_path,
+        gitignore,
+        exclude_paths=excluded_outputs,
+    )
+    if analysis_json and project_analysis is not None:
+        from .analysis import write_analysis_json
+
+        write_analysis_json(project_analysis, analysis_json)
+
+    # 7. Write the output file.
+    output_parent = os.path.dirname(os.path.abspath(output_file))
+    if output_parent:
+        os.makedirs(output_parent, exist_ok=True)
 
     with open(output_file, "w", encoding="utf-8") as f_out:
         f_out.write("Project Structure:\n")
@@ -601,9 +637,23 @@ def traverse_and_copy(
                 f_out.write(f"  {lang}: {pct}%\n")
             f_out.write("\n")
 
-        for fpath in files:
-            relative_path = os.path.relpath(fpath, start=repo_path)
-            write_file_contents(f_out, relative_path, fpath)
+        if include_analysis and project_analysis is not None:
+            from .analysis import render_project_analysis
+
+            f_out.write(
+                render_project_analysis(
+                    project_analysis,
+                    dependency_format=dependency_format,
+                    max_symbols_per_file=max_symbols_per_file,
+                    include_external_dependencies=include_external_dependencies,
+                )
+            )
+            f_out.write("\n")
+
+        if not analysis_only:
+            for fpath in files:
+                relative_path = os.path.relpath(fpath, start=repo_path)
+                write_file_contents(f_out, relative_path, fpath)
 
     print(f"Wrote {len(files)} file(s) to '{output_file}'.")
     return len(files)

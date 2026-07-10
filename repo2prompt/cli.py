@@ -11,12 +11,9 @@ import argparse
 import os
 import sys
 
-from .core import (
-    GitignoreFilter,
-    LANGUAGE_EXTENSIONS,
-    detect_languages,
-    traverse_and_copy,
-)
+from . import __version__
+from .core import GitignoreFilter, detect_languages, traverse_and_copy
+from .languages import LANGUAGE_EXTENSIONS
 
 
 # All language keys in a stable order — used to generate flags and to
@@ -39,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     parser.add_argument(
         "repo_path",
         help="Path to the repository root.",
@@ -97,6 +99,48 @@ def build_parser() -> argparse.ArgumentParser:
             "(loaded .gitignore files, file counts, etc.). "
             "Useful when nothing seems to match."
         ),
+    )
+
+    analysis_group = parser.add_argument_group(
+        "code analysis",
+        "Generate a dependency map, symbol signatures, cycle information, "
+        "and prompt-size statistics.",
+    )
+    analysis_group.add_argument(
+        "--no-analysis",
+        action="store_true",
+        default=False,
+        help="Disable the code-analysis section and preserve the legacy output layout.",
+    )
+    analysis_group.add_argument(
+        "--analysis-only",
+        action="store_true",
+        default=False,
+        help="Write the project tree and code analysis without full file contents.",
+    )
+    analysis_group.add_argument(
+        "--dependency-format",
+        choices=("text", "mermaid", "both"),
+        default="text",
+        help="Dependency-map format. (default: text)",
+    )
+    analysis_group.add_argument(
+        "--analysis-json",
+        metavar="PATH",
+        help="Also write the complete static-analysis result as JSON.",
+    )
+    analysis_group.add_argument(
+        "--max-symbols-per-file",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Maximum signatures shown per file; 0 means unlimited. (default: 50)",
+    )
+    analysis_group.add_argument(
+        "--no-external-deps",
+        action="store_true",
+        default=False,
+        help="Hide external package imports from the text dependency map.",
     )
 
     # Language shorthand flags --------------------------------------------
@@ -158,6 +202,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {lang:<8} {pct:>5.1f}%  {bar}")
         return 0
 
+    if args.no_analysis and args.analysis_only:
+        parser.error("--no-analysis cannot be combined with --analysis-only")
+    if args.max_symbols_per_file < 0:
+        parser.error("--max-symbols-per-file must be zero or positive")
+    if args.analysis_json and os.path.abspath(args.analysis_json) == os.path.abspath(
+        args.output
+    ):
+        parser.error("--analysis-json must be different from --output")
+
     patterns = resolve_patterns(args)
 
     n_written = traverse_and_copy(
@@ -167,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
         include_important=not args.no_important,
         show_language_stats=not args.no_lang_stats,
         verbose=args.verbose,
+        include_analysis=not args.no_analysis,
+        analysis_only=args.analysis_only,
+        dependency_format=args.dependency_format,
+        analysis_json=args.analysis_json,
+        max_symbols_per_file=args.max_symbols_per_file,
+        include_external_dependencies=not args.no_external_deps,
     )
 
     return 0 if n_written >= 0 else 1
